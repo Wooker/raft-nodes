@@ -1,7 +1,4 @@
-use std::{
-    net::{SocketAddrV4, TcpStream},
-    time::Duration,
-};
+use std::{net::SocketAddrV4, time::Duration};
 
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -28,6 +25,9 @@ pub enum Message {
     Vote {
         candidate_id: usize,
     },
+    RequestEntries {
+        candidate_id: usize,
+    },
     AppendEntries {
         entries: Vec<LogEntry>,
         leader_term: usize,
@@ -38,13 +38,12 @@ pub enum Message {
 pub struct Node {
     pub id: usize,
     pub addr: SocketAddrV4,
-    pub term: usize,
+    // pub term: usize,
     pub nodes: Vec<SocketAddrV4>,
-    connections: Vec<TcpStream>,
     pub delay: Duration,
     pub role: Role,
-    pub voted_for: Option<usize>,
-    log: Vec<LogEntry>,
+    // pub voted_for: Option<usize>,
+    // log: Vec<LogEntry>,
 }
 
 impl Node {
@@ -53,13 +52,13 @@ impl Node {
         Self {
             id,
             addr,
-            term: 0,
+            // term: 0,
             nodes: nodes,
-            connections: vec![],
+            // connections: vec![],
             delay: Duration::from_secs(rnd),
             role: Role::Candidate,
-            voted_for: None,
-            log: vec![],
+            // voted_for: None,
+            // log: vec![],
         }
     }
 }
