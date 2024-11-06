@@ -7,3 +7,4 @@ edition = "2021"
 serde = { version = "*", features = ["derive"] }
 bincode = "1.3"
 rand = "*"
+tokio = { version = "1", features = ["full"] }

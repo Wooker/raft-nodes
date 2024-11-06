@@ -1,3 +1,6 @@
+#![allow(unused)]
+#![allow(dead_code)]
+
 use std::{
     env,
     net::{Ipv4Addr, SocketAddrV4},
@@ -18,7 +21,8 @@ const NODES: [SocketAddrV4; 4] = [
     SocketAddrV4::new(Ipv4Addr::new(127, 0, 0, 1), 5004),
 ];
 
-fn main() {
+#[tokio::main]
+async fn main() -> Result<(), std::io::Error> {
     let args: Vec<String> = env::args().collect();
     println!("Args: {:?}", args);
     if args.len() != 2 {
@@ -31,6 +35,6 @@ fn main() {
         NODES.to_vec(),
     );
     let delay = node.delay;
-    let peer = Peer::new(node, delay);
-    peer.run();
+    let mut peer = Peer::new(node, delay);
+    peer.run().await
 }

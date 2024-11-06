@@ -1,9 +1,18 @@
+#![allow(unused)]
+#![allow(dead_code)]
+
 use std::{
-    io::{Read, Write},
-    net::{SocketAddrV4, TcpListener, TcpStream},
+    cmp::max,
+    io::{self},
+    net::{SocketAddr, SocketAddrV4},
     sync::{Arc, RwLock},
     thread::{self, park_timeout, sleep},
-    time::Duration,
+    time::{Duration, Instant},
+};
+use tokio::net::{TcpListener, TcpSocket, TcpStream};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    time,
 };
 
 use crate::node::{Message, Node, Role};
@@ -21,68 +30,142 @@ impl Peer {
         }
     }
 
-    pub fn run(&self) {
-        // Spawn a thread for handling incoming connections
-        let node_l = Arc::clone(&self.node);
-        thread::spawn(move || {
-            println!("Listening");
+    // Connection handler for accepted connections
+    async fn handle_connection(addr: SocketAddr, mut stream: TcpStream) -> std::io::Result<()> {
+        use tokio::io::AsyncReadExt;
 
-            let addr = {
-                let node_read = node_l.read().unwrap();
-                node_read.addr
-            };
+        let mut buffer = [0; 1024];
+        match stream.read(&mut buffer).await {
+            Ok(bytes_read) => {
+                let str = "Hello";
+                println!("<<< {} [{}]", bytes_read, addr);
+                stream.write_all(str.as_bytes()).await.unwrap();
+                stream.flush().await.unwrap();
+                println!(">>> {}", str);
+            }
+            Err(e) => {
+                eprintln!("Failed to read from stream: {}", e);
+            }
+        }
+        Ok(())
+    }
 
-            let listener = TcpListener::bind(addr).unwrap();
-            for s in listener.incoming() {
-                match s {
+    pub async fn run(&mut self) -> io::Result<()> {
+        println!("Starting server...");
+
+        loop {
+            // Step 1: Run listener for a specific duration
+            self.run_listener().await?;
+
+            // Step 2: After listener duration, switch to client mode
+            println!("Listener duration expired. Switching to client mode.");
+            self.run_sender().await?;
+
+            println!("Finished client connections. Returning.");
+        }
+        Ok(())
+    }
+
+    async fn run_listener(&mut self) -> io::Result<()> {
+        let addr = { self.node.read().unwrap().addr };
+        let listen_duration = self.delay;
+
+        'listener: loop {
+            // Create a new TcpSocket for listening
+            let sock = TcpSocket::new_v4().unwrap();
+            sock.set_reuseaddr(true).unwrap();
+            sock.bind(std::net::SocketAddr::V4(addr))
+                .expect("Could not bind the socket for listening");
+
+            println!("Listener started on {:?}", addr);
+            let listener = sock.listen(1024).unwrap();
+
+            let accept_timeout = self.delay;
+            match time::timeout(accept_timeout, listener.accept()).await {
+                Ok(Ok((stream, addr))) => {
+                    Self::handle_connection(addr, stream).await.unwrap();
+                }
+                Ok(Err(e)) => {
+                    eprintln!("Failed to accept connection: {}", e);
+                    break;
+                }
+                Err(_) => {
+                    println!("No connection received within the timeout period");
+                    drop(listener);
+                    break 'listener;
+                }
+            }
+            println!();
+        }
+        Ok(())
+    }
+
+    async fn run_sender(&self) -> io::Result<()> {
+        let (addr, nodes) = {
+            let node = self.node.read().unwrap();
+            let addr = node.addr.clone();
+            (
+                addr,
+                node.nodes
+                    .clone()
+                    .into_iter()
+                    .filter(|p| *p != addr)
+                    .collect::<Vec<SocketAddrV4>>()
+                    .clone(),
+            )
+        };
+
+        'sender: loop {
+            for &node_addr in &nodes {
+                // Create a new TcpSocket for each connection attempt
+                let sock = TcpSocket::new_v4().unwrap();
+                sock.set_reuseaddr(true).unwrap();
+                sock.bind(SocketAddr::V4(addr))
+                    .expect("Could not bind the socket for stream");
+
+                match sock.connect(SocketAddr::V4(node_addr)).await {
                     Ok(mut stream) => {
-                        let role = {
-                            let node_read = node_l.read().unwrap();
-                            node_read.role
-                        };
-                        match role {
-                            Role::Leader => Self::handle_leader(&node_l, &mut stream),
-                            Role::Follower => Self::handle_follower(&node_l, &mut stream),
-                            Role::Candidate => Self::handle_candidate(&node_l, &mut stream),
+                        let message = "Hello from client!";
+                        stream.write_all(message.as_bytes()).await.unwrap();
+                        stream.flush().await.unwrap();
+                        println!(">>> {} [{}]", message, node_addr);
+
+                        let mut buffer = [0; 1024];
+                        match stream.read(&mut buffer).await {
+                            Ok(bytes_read) => {
+                                let str = "Hello";
+                                println!("<<< {} [{}]", bytes_read, addr);
+                                stream.write_all(str.as_bytes()).await.unwrap();
+                                stream.flush().await.unwrap();
+                                println!(">>> {}", str);
+                            }
+                            Err(e) => {
+                                eprintln!("Failed to read from stream: {}", e);
+                            }
                         }
                     }
                     Err(e) => {
-                        println!("Error: {:?}", e);
+                        eprintln!("Failed to connect as a client: {}", e);
                     }
                 }
             }
-        });
 
-        // Spawn a thread for periodic tasks based on the role
-        let delay = self.delay;
-        let node_s = Arc::clone(&self.node);
-        thread::spawn(move || loop {
-            sleep(delay);
+            println!();
+            thread::sleep(self.delay - Duration::from_secs(1));
+        }
 
-            let role = {
-                let node_read = node_s.read().unwrap();
-                node_read.role
-            };
-
-            match role {
-                Role::Leader => Self::leader_periodic_task(&node_s),
-                Role::Follower => Self::follower_periodic_task(&node_s, delay),
-                Role::Candidate => Self::candidate_periodic_task(&node_s),
-            }
-        });
-
-        loop {}
+        Ok(())
     }
 
-    fn handle_leader(node: &Arc<RwLock<Node>>, stream: &mut TcpStream) {
+    async fn handle_leader(node: &Arc<RwLock<Node>>, stream: &mut TcpStream) {
         println!("Leader handling incoming connection");
         // Leader-specific logic here
     }
 
-    fn handle_follower(node: &Arc<RwLock<Node>>, stream: &mut TcpStream) {
+    async fn handle_follower(node: &Arc<RwLock<Node>>, stream: &mut TcpStream) {
         // Follower-specific logic here
         let mut buf = String::new();
-        stream.read_to_string(&mut buf).unwrap();
+        stream.read_to_string(&mut buf).await.unwrap();
         let message = bincode::deserialize::<Message>(buf.as_bytes()).unwrap();
 
         println!("\nFollower: {:?}", message);
@@ -100,16 +183,17 @@ impl Peer {
         println!("Follower reply: {:?}", response);
         stream
             .write_all(&bincode::serialize(&response).unwrap())
+            .await
             .unwrap();
-        stream.flush().unwrap();
+        stream.flush().await.unwrap();
     }
 
-    fn handle_candidate(node: &Arc<RwLock<Node>>, stream: &mut TcpStream) {
+    async fn handle_candidate(node: &Arc<RwLock<Node>>, stream: &mut TcpStream) {
         println!("Candidate handling incoming connection");
 
         // Read data outside of lock
         let mut buf = String::new();
-        stream.read_to_string(&mut buf).unwrap();
+        stream.read_to_string(&mut buf).await.unwrap();
 
         // Only acquire write lock when needed
         let mut node_write = node.write().unwrap();
@@ -117,15 +201,15 @@ impl Peer {
         println!("Now Follower");
 
         // Flush and finalize handling
-        stream.flush().unwrap();
+        stream.flush().await.unwrap();
     }
 
-    fn leader_periodic_task(node: &Arc<RwLock<Node>>) {
+    async fn leader_periodic_task(node: &Arc<RwLock<Node>>) {
         println!("Leader periodic task");
         // Implement leader-specific periodic task
     }
 
-    fn follower_periodic_task(node: &Arc<RwLock<Node>>, delay: Duration) {
+    async fn follower_periodic_task(node: &Arc<RwLock<Node>>, delay: Duration) {
         println!("Follower periodic task");
 
         // Implement follower-specific task loop
@@ -134,7 +218,7 @@ impl Peer {
         }
     }
 
-    fn candidate_periodic_task(node: &Arc<RwLock<Node>>) {
+    async fn candidate_periodic_task(node: &Arc<RwLock<Node>>) {
         println!("Candidate periodic task");
 
         let addresses: Vec<SocketAddrV4> = {
@@ -147,6 +231,7 @@ impl Peer {
                 .collect()
         };
 
+        /*
         for addr in addresses {
             if let Ok(mut stream) = TcpStream::connect_timeout(&addr.into(), Duration::from_secs(5))
             {
@@ -174,5 +259,6 @@ impl Peer {
                 }
             }
         }
+        */
     }
 }

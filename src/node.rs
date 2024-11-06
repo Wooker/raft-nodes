@@ -1,3 +1,5 @@
+#![allow(unused)]
+
 use std::{net::SocketAddrV4, time::Duration};
 
 use rand::Rng;
