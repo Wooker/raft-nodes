@@ -24,7 +24,7 @@ const NODES: [SocketAddrV4; 4] = [
 #[tokio::main]
 async fn main() -> Result<(), std::io::Error> {
     let args: Vec<String> = env::args().collect();
-    println!("Args: {:?}", args);
+
     if args.len() != 2 {
         println!("Provide socket address as command line argument");
         exit(1);

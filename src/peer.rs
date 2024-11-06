@@ -20,6 +20,7 @@ pub struct Peer {
 }
 
 pub enum Action {
+    NOP,
     Become(Role),
     AddVote,
     Append(Vec<String>),
@@ -34,12 +35,13 @@ impl Peer {
     }
 
     pub async fn run(&mut self) -> io::Result<()> {
-        println!("Starting server...");
-
         loop {
             // Step 1: Run listener for a specific duration
             self.run_listener().await?;
 
+            {
+                println!("{}", self.node.read().unwrap().term);
+            }
             {
                 self.node.write().unwrap().role = Role::Candidate;
             }
@@ -66,7 +68,6 @@ impl Peer {
             sock.bind(std::net::SocketAddr::V4(addr))
                 .expect("Could not bind the socket for listening");
 
-            println!("Listener started on {:?}", addr);
             let listener = sock.listen(1024).unwrap();
 
             let accept_timeout = self.delay;
@@ -84,7 +85,10 @@ impl Peer {
                         Message::AppendEntries {
                             ref mut entries,
                             term,
-                        } => self.node.write().unwrap().log.append(entries),
+                        } => {
+                            self.node.write().unwrap().log.append(entries);
+                            self.node.write().unwrap().term = term
+                        }
                         _ => todo!(),
                     }
 
@@ -130,7 +134,6 @@ impl Peer {
                 sock.bind(SocketAddr::V4(addr))
                     .expect("Could not bind the socket for stream");
 
-                println!("Sender role: {:?}", role);
                 match sock.connect(SocketAddr::V4(node_addr)).await {
                     Ok(mut stream) => {
                         // First write message then read the response
@@ -154,6 +157,7 @@ impl Peer {
                             Action::Append(mut vec) => {
                                 self.node.write().unwrap().log.append(&mut vec)
                             }
+                            Action::NOP => {}
                         }
                     }
                     Err(e) => {
@@ -210,7 +214,7 @@ impl Peer {
             }
             Err(e) => {
                 eprintln!("Failed to read from stream: {}", e);
-                todo!()
+                Action::NOP
             }
         };
         Ok(action)
