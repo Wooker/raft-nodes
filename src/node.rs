@@ -1,12 +1,16 @@
 #![allow(unused)]
 
 use std::{
+    collections::HashMap,
+    fmt::Display,
     net::{SocketAddr, SocketAddrV4},
     time::Duration,
 };
 
 use rand::Rng;
 use serde::{Deserialize, Serialize};
+
+use crate::flow_entry::{FlowModEntries, SwitchData};
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Role {
@@ -32,11 +36,11 @@ pub enum Message {
         term: usize,
     },
     RequestEntries {
-        candidate_id: SocketAddr,
+        entries: HashMap<SocketAddr, SwitchData>,
         term: usize,
     },
     AppendEntries {
-        entries: Vec<String>,
+        entries: HashMap<SocketAddr, SwitchData>,
         term: usize,
     },
 }
@@ -45,28 +49,43 @@ pub enum Message {
 pub struct Node {
     pub addr: SocketAddrV4,
     // pub term: usize,
+    pub controller_port: usize,
     pub nodes: Vec<SocketAddrV4>,
     pub delay: Duration,
     pub role: Role,
     pub term: usize,
     pub votes: usize,
     // pub voted_for: Option<usize>,
-    pub log: Vec<String>,
+    pub log: HashMap<SocketAddr, SwitchData>,
 }
 
 impl Node {
-    pub fn new(id: usize, addr: SocketAddrV4, nodes: Vec<SocketAddrV4>) -> Self {
+    pub fn new(
+        id: usize,
+        addr: SocketAddrV4,
+        controller_port: usize,
+        nodes: Vec<SocketAddrV4>,
+    ) -> Self {
         let rnd = rand::thread_rng().gen_range(3..5);
+
+        let mut map = HashMap::new();
+        for n in nodes.iter() {
+            map.insert(
+                SocketAddr::V4(n.clone()),
+                HashMap::<String, Vec<FlowModEntries>>::new(),
+            );
+        }
         Self {
             addr,
             term: 0,
             nodes,
+            controller_port,
             // connections: vec![],
             votes: 0,
             delay: Duration::from_secs(rnd),
             role: Role::Candidate,
             // voted_for: None,
-            log: vec![],
+            log: map,
         }
     }
 }
