@@ -22,6 +22,7 @@ pub struct Peer {
 pub enum Action {
     Become(Role),
     AddVote,
+    Append(Vec<String>),
 }
 
 impl Peer {
@@ -38,6 +39,10 @@ impl Peer {
         loop {
             // Step 1: Run listener for a specific duration
             self.run_listener().await?;
+
+            {
+                self.node.write().unwrap().role = Role::Candidate;
+            }
 
             // Step 2: After listener duration, switch to client mode
             println!("Listener duration expired. Switching to client mode.");
@@ -67,18 +72,19 @@ impl Peer {
             let accept_timeout = self.delay;
             match time::timeout(accept_timeout, listener.accept()).await {
                 Ok(Ok((stream, addr))) => {
-                    let (stream, message) = Self::listener_read_message(stream, role, term)
+                    let (stream, mut message) = Self::listener_read_message(stream, role, term)
                         .await
                         .unwrap();
 
                     match message {
-                        Message::Vote { candidate_id } => {
+                        Message::Vote { candidate_id, term } => {
                             self.node.write().unwrap().role = Role::Follower;
+                            self.node.write().unwrap().term = term;
                         }
                         Message::AppendEntries {
-                            entries,
-                            leader_term,
-                        } => todo!(),
+                            ref mut entries,
+                            term,
+                        } => self.node.write().unwrap().log.append(entries),
                         _ => todo!(),
                     }
 
@@ -145,6 +151,9 @@ impl Peer {
                                 println!("New role: {:?}", new_role);
                             }
                             Action::AddVote => self.node.write().unwrap().votes += 1,
+                            Action::Append(mut vec) => {
+                                self.node.write().unwrap().log.append(&mut vec)
+                            }
                         }
                     }
                     Err(e) => {
@@ -154,6 +163,7 @@ impl Peer {
             }
 
             println!();
+            self.node.write().unwrap().term += 1;
             thread::sleep(self.delay - Duration::from_secs(1));
         }
 
@@ -193,7 +203,8 @@ impl Peer {
                 println!("<<< {:?} [{}]", message, stream.peer_addr().unwrap());
 
                 match message {
-                    Message::Vote { candidate_id } => Action::Become(Role::Leader),
+                    Message::Vote { candidate_id, term } => Action::Become(Role::Leader),
+                    Message::AppendEntries { entries, term } => Action::Append(entries),
                     _ => todo!(),
                 }
             }
@@ -218,18 +229,20 @@ impl Peer {
 
                 match role {
                     Role::Follower => match message {
-                        Message::RequestVote { candidate_id, term } => todo!(),
-                        Message::Vote { candidate_id } => todo!(),
+                        Message::RequestVote { candidate_id, term } => {
+                            Message::Vote { candidate_id, term }
+                        }
                         Message::RequestEntries { candidate_id, term } => todo!(),
-                        Message::AppendEntries {
-                            entries,
-                            leader_term,
-                        } => todo!(),
+                        _ => todo!(),
                     },
                     Role::Candidate => match message {
                         Message::RequestVote { candidate_id, term } => {
-                            Message::Vote { candidate_id }
+                            Message::Vote { candidate_id, term }
                         }
+                        Message::RequestEntries { candidate_id, term } => Message::AppendEntries {
+                            entries: vec![],
+                            term,
+                        },
                         _ => todo!(),
                     },
                     _ => todo!(),

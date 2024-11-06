@@ -29,14 +29,15 @@ pub enum Message {
     },
     Vote {
         candidate_id: SocketAddr,
+        term: usize,
     },
     RequestEntries {
         candidate_id: SocketAddr,
         term: usize,
     },
     AppendEntries {
-        entries: Vec<LogEntry>,
-        leader_term: usize,
+        entries: Vec<String>,
+        term: usize,
     },
 }
 
@@ -50,7 +51,7 @@ pub struct Node {
     pub term: usize,
     pub votes: usize,
     // pub voted_for: Option<usize>,
-    // log: Vec<LogEntry>,
+    pub log: Vec<String>,
 }
 
 impl Node {
@@ -65,7 +66,7 @@ impl Node {
             delay: Duration::from_secs(rnd),
             role: Role::Candidate,
             // voted_for: None,
-            // log: vec![],
+            log: vec![],
         }
     }
 }
