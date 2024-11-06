@@ -1,6 +1,3 @@
-#![allow(unused)]
-#![allow(dead_code)]
-
 use std::{
     cmp::max,
     io::{self},
@@ -22,32 +19,17 @@ pub struct Peer {
     delay: Duration,
 }
 
+pub enum Action {
+    Become(Role),
+    AddVote,
+}
+
 impl Peer {
     pub fn new(node: Node, delay: Duration) -> Self {
         Self {
             node: Arc::new(RwLock::new(node)),
             delay,
         }
-    }
-
-    // Connection handler for accepted connections
-    async fn handle_connection(addr: SocketAddr, mut stream: TcpStream) -> std::io::Result<()> {
-        use tokio::io::AsyncReadExt;
-
-        let mut buffer = [0; 1024];
-        match stream.read(&mut buffer).await {
-            Ok(bytes_read) => {
-                let str = "Hello";
-                println!("<<< {} [{}]", bytes_read, addr);
-                stream.write_all(str.as_bytes()).await.unwrap();
-                stream.flush().await.unwrap();
-                println!(">>> {}", str);
-            }
-            Err(e) => {
-                eprintln!("Failed to read from stream: {}", e);
-            }
-        }
-        Ok(())
     }
 
     pub async fn run(&mut self) -> io::Result<()> {
@@ -67,8 +49,10 @@ impl Peer {
     }
 
     async fn run_listener(&mut self) -> io::Result<()> {
-        let addr = { self.node.read().unwrap().addr };
-        let listen_duration = self.delay;
+        let (addr, role, term) = {
+            let node = self.node.read().unwrap();
+            (node.addr, node.role, node.term)
+        };
 
         'listener: loop {
             // Create a new TcpSocket for listening
@@ -83,7 +67,22 @@ impl Peer {
             let accept_timeout = self.delay;
             match time::timeout(accept_timeout, listener.accept()).await {
                 Ok(Ok((stream, addr))) => {
-                    Self::handle_connection(addr, stream).await.unwrap();
+                    let (stream, message) = Self::listener_read_message(stream, role, term)
+                        .await
+                        .unwrap();
+
+                    match message {
+                        Message::Vote { candidate_id } => {
+                            self.node.write().unwrap().role = Role::Follower;
+                        }
+                        Message::AppendEntries {
+                            entries,
+                            leader_term,
+                        } => todo!(),
+                        _ => todo!(),
+                    }
+
+                    Self::listener_write_message(stream, message).await.unwrap();
                 }
                 Ok(Err(e)) => {
                     eprintln!("Failed to accept connection: {}", e);
@@ -101,21 +100,23 @@ impl Peer {
     }
 
     async fn run_sender(&self) -> io::Result<()> {
-        let (addr, nodes) = {
-            let node = self.node.read().unwrap();
-            let addr = node.addr.clone();
-            (
-                addr,
-                node.nodes
-                    .clone()
-                    .into_iter()
-                    .filter(|p| *p != addr)
-                    .collect::<Vec<SocketAddrV4>>()
-                    .clone(),
-            )
-        };
-
         'sender: loop {
+            let (addr, nodes, role, term) = {
+                let node = self.node.read().unwrap();
+                let addr = node.addr.clone();
+                (
+                    addr,
+                    node.nodes
+                        .clone()
+                        .into_iter()
+                        .filter(|p| *p != addr)
+                        .collect::<Vec<SocketAddrV4>>()
+                        .clone(),
+                    node.role,
+                    node.term,
+                )
+            };
+
             for &node_addr in &nodes {
                 // Create a new TcpSocket for each connection attempt
                 let sock = TcpSocket::new_v4().unwrap();
@@ -123,25 +124,27 @@ impl Peer {
                 sock.bind(SocketAddr::V4(addr))
                     .expect("Could not bind the socket for stream");
 
+                println!("Sender role: {:?}", role);
                 match sock.connect(SocketAddr::V4(node_addr)).await {
                     Ok(mut stream) => {
-                        let message = "Hello from client!";
-                        stream.write_all(message.as_bytes()).await.unwrap();
-                        stream.flush().await.unwrap();
-                        println!(">>> {} [{}]", message, node_addr);
+                        // First write message then read the response
+                        let action = Self::sender_read_message(
+                            Self::sender_write_message(stream, role, term)
+                                .await
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
 
-                        let mut buffer = [0; 1024];
-                        match stream.read(&mut buffer).await {
-                            Ok(bytes_read) => {
-                                let str = "Hello";
-                                println!("<<< {} [{}]", bytes_read, addr);
-                                stream.write_all(str.as_bytes()).await.unwrap();
-                                stream.flush().await.unwrap();
-                                println!(">>> {}", str);
+                        match action {
+                            Action::Become(r) => {
+                                {
+                                    self.node.write().unwrap().role = r;
+                                }
+                                let new_role = { self.node.read().unwrap().role };
+                                println!("New role: {:?}", new_role);
                             }
-                            Err(e) => {
-                                eprintln!("Failed to read from stream: {}", e);
-                            }
+                            Action::AddVote => self.node.write().unwrap().votes += 1,
                         }
                     }
                     Err(e) => {
@@ -157,108 +160,101 @@ impl Peer {
         Ok(())
     }
 
-    async fn handle_leader(node: &Arc<RwLock<Node>>, stream: &mut TcpStream) {
-        println!("Leader handling incoming connection");
-        // Leader-specific logic here
-    }
-
-    async fn handle_follower(node: &Arc<RwLock<Node>>, stream: &mut TcpStream) {
-        // Follower-specific logic here
-        let mut buf = String::new();
-        stream.read_to_string(&mut buf).await.unwrap();
-        let message = bincode::deserialize::<Message>(buf.as_bytes()).unwrap();
-
-        println!("\nFollower: {:?}", message);
-
-        let response = match message {
-            Message::RequestVote { candidate_id } => Message::Vote { candidate_id },
-            Message::Vote { candidate_id } => todo!(),
-            Message::AppendEntries {
-                entries,
-                leader_term,
-            } => todo!(),
-            Message::RequestEntries { candidate_id } => todo!(),
+    async fn sender_write_message(
+        mut stream: TcpStream,
+        role: Role,
+        term: usize,
+    ) -> tokio::io::Result<TcpStream> {
+        let message = match role {
+            Role::Leader => Message::RequestEntries {
+                candidate_id: stream.local_addr().unwrap(),
+                term,
+            },
+            Role::Follower => todo!(),
+            Role::Candidate => Message::RequestVote {
+                candidate_id: stream.local_addr().unwrap(),
+                term,
+            },
         };
-
-        println!("Follower reply: {:?}", response);
         stream
-            .write_all(&bincode::serialize(&response).unwrap())
+            .write_all(bincode::serialize(&message).unwrap().as_slice())
             .await
             .unwrap();
         stream.flush().await.unwrap();
+        println!(">>> {:?} [{}]", message, stream.peer_addr().unwrap());
+
+        Ok(stream)
     }
+    async fn sender_read_message(mut stream: TcpStream) -> tokio::io::Result<Action> {
+        let mut buffer = [0; 1024];
+        let action = match stream.read(&mut buffer).await {
+            Ok(bytes_read) => {
+                let message = bincode::deserialize::<Message>(&buffer).unwrap();
+                println!("<<< {:?} [{}]", message, stream.peer_addr().unwrap());
 
-    async fn handle_candidate(node: &Arc<RwLock<Node>>, stream: &mut TcpStream) {
-        println!("Candidate handling incoming connection");
-
-        // Read data outside of lock
-        let mut buf = String::new();
-        stream.read_to_string(&mut buf).await.unwrap();
-
-        // Only acquire write lock when needed
-        let mut node_write = node.write().unwrap();
-        node_write.role = Role::Follower;
-        println!("Now Follower");
-
-        // Flush and finalize handling
-        stream.flush().await.unwrap();
-    }
-
-    async fn leader_periodic_task(node: &Arc<RwLock<Node>>) {
-        println!("Leader periodic task");
-        // Implement leader-specific periodic task
-    }
-
-    async fn follower_periodic_task(node: &Arc<RwLock<Node>>, delay: Duration) {
-        println!("Follower periodic task");
-
-        // Implement follower-specific task loop
-        loop {
-            sleep(delay);
-        }
-    }
-
-    async fn candidate_periodic_task(node: &Arc<RwLock<Node>>) {
-        println!("Candidate periodic task");
-
-        let addresses: Vec<SocketAddrV4> = {
-            let node_read = node.read().unwrap();
-            node_read
-                .nodes
-                .iter()
-                .filter(|&&p| p != node_read.addr)
-                .cloned()
-                .collect()
-        };
-
-        /*
-        for addr in addresses {
-            if let Ok(mut stream) = TcpStream::connect_timeout(&addr.into(), Duration::from_secs(5))
-            {
-                println!("Connected to: {}", addr);
-                stream
-                    .write_all(
-                        bincode::serialize(&Message::RequestVote {
-                            candidate_id: node.read().unwrap().id,
-                        })
-                        .unwrap()
-                        .as_slice(),
-                    )
-                    .unwrap();
-
-                // Read response
-                let mut buf = Vec::new();
-                if stream.read_to_end(&mut buf).is_ok() {
-                    if let Ok(response) = bincode::deserialize::<Message>(&buf) {
-                        println!("Candidate received response: {:?}", response);
-                    } else {
-                        println!("Failed to deserialize response from {:?}", addr);
-                    }
-                } else {
-                    println!("Failed to read response from {:?}", addr);
+                match message {
+                    Message::Vote { candidate_id } => Action::Become(Role::Leader),
+                    _ => todo!(),
                 }
             }
-        }
-        */
+            Err(e) => {
+                eprintln!("Failed to read from stream: {}", e);
+                todo!()
+            }
+        };
+        Ok(action)
+    }
+
+    async fn listener_read_message(
+        mut stream: TcpStream,
+        role: Role,
+        term: usize,
+    ) -> tokio::io::Result<(TcpStream, Message)> {
+        let mut buffer = [0; 1024];
+        let message = match stream.read(&mut buffer).await {
+            Ok(bytes_read) => {
+                let message = bincode::deserialize::<Message>(buffer.as_slice()).unwrap();
+                println!("<<< {:?} [{}]", message, stream.peer_addr().unwrap());
+
+                match role {
+                    Role::Follower => match message {
+                        Message::RequestVote { candidate_id, term } => todo!(),
+                        Message::Vote { candidate_id } => todo!(),
+                        Message::RequestEntries { candidate_id, term } => todo!(),
+                        Message::AppendEntries {
+                            entries,
+                            leader_term,
+                        } => todo!(),
+                    },
+                    Role::Candidate => match message {
+                        Message::RequestVote { candidate_id, term } => {
+                            Message::Vote { candidate_id }
+                        }
+                        _ => todo!(),
+                    },
+                    _ => todo!(),
+                }
+            }
+            Err(e) => {
+                eprintln!("Failed to read from stream: {}", e);
+                todo!()
+            }
+        };
+
+        Ok((stream, message))
+    }
+
+    async fn listener_write_message(
+        mut stream: TcpStream,
+        message: Message,
+    ) -> tokio::io::Result<TcpStream> {
+        stream
+            .write_all(bincode::serialize(&message).unwrap().as_slice())
+            .await
+            .unwrap();
+        stream.flush().await.unwrap();
+        println!(">>> {:?} [{}]", message, stream.peer_addr().unwrap());
+
+        Ok(stream)
     }
 }

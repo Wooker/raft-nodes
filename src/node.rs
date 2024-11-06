@@ -1,6 +1,9 @@
 #![allow(unused)]
 
-use std::{net::SocketAddrV4, time::Duration};
+use std::{
+    net::{SocketAddr, SocketAddrV4},
+    time::Duration,
+};
 
 use rand::Rng;
 use serde::{Deserialize, Serialize};
@@ -21,14 +24,15 @@ pub struct LogEntry {
 #[derive(Debug, Serialize, Deserialize)]
 pub enum Message {
     RequestVote {
-        candidate_id: usize,
-        // candidate_term: usize,
+        candidate_id: SocketAddr,
+        term: usize,
     },
     Vote {
-        candidate_id: usize,
+        candidate_id: SocketAddr,
     },
     RequestEntries {
-        candidate_id: usize,
+        candidate_id: SocketAddr,
+        term: usize,
     },
     AppendEntries {
         entries: Vec<LogEntry>,
@@ -38,12 +42,13 @@ pub enum Message {
 
 #[derive(Debug)]
 pub struct Node {
-    pub id: usize,
     pub addr: SocketAddrV4,
     // pub term: usize,
     pub nodes: Vec<SocketAddrV4>,
     pub delay: Duration,
     pub role: Role,
+    pub term: usize,
+    pub votes: usize,
     // pub voted_for: Option<usize>,
     // log: Vec<LogEntry>,
 }
@@ -52,11 +57,11 @@ impl Node {
     pub fn new(id: usize, addr: SocketAddrV4, nodes: Vec<SocketAddrV4>) -> Self {
         let rnd = rand::thread_rng().gen_range(3..5);
         Self {
-            id,
             addr,
-            // term: 0,
-            nodes: nodes,
+            term: 0,
+            nodes,
             // connections: vec![],
+            votes: 0,
             delay: Duration::from_secs(rnd),
             role: Role::Candidate,
             // voted_for: None,
